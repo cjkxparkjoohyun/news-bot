@@ -10,7 +10,7 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 KST = timezone(timedelta(hours=9))
 
-# 1. 사내 대시보드 기반 복합 카테고리 및 키워드 세트 정의
+# 사내 대시보드 기반 복합 카테고리 및 키워드 세트 정의
 KW_PARCEL = ["택배", "물류", "배송", "화물", "운송", "택배기사", "화물연대", "택배노조", "택배업계", "택배차량"]
 KW_WAGE = ["임금", "통상임금", "수당", "급여", "처우", "성과급", "기본급", "임금인상", "임금체불"]
 KW_SAFETY = ["안전", "산재", "안전사고", "사고", "과로사", "산업안전", "안전기준", "사망", "위험"]
@@ -18,13 +18,11 @@ KW_UNION = ["노동조합", "노조", "파업", "교섭", "단체교섭", "노�
 KW_POLICY = ["정책", "제도", "법안", "개정", "정부", "규제", "고용부", "국토부", "대책", "법제화"]
 KW_POLITICS = ["정치", "국회", "여당", "야당", "국회의원", "선거", "정당", "상임위", "입법"]
 
-# 2. 구글 뉴스 RSS 검색에 활용할 대표 키워드 통합 리스트 (대시보드 키워드 포함)
 KEYWORDS = [
     "단체교섭", "노사관계", "택배노조", "화물연대", "노동위원회",
     "택배", "물류", "배송", "화물", "임금", "안전", "산재", "과로사", "노조", "파업", "국토부"
 ]
 
-# 3. 주요 물류/택배 기업 정의
 COMPANIES = {
     "CJ대한통운": ["CJ대한통운", "CJ"],
     "쿠팡": ["쿠팡", "쿠팡CLS", "쿠팡이츠", "CLS"],
@@ -62,7 +60,6 @@ def send_telegram(text):
         return False
 
 def categorize(text):
-    """기사 내용에서 사내 대시보드 기준 카테고리 판별"""
     if any(kw in text for kw in KW_PARCEL): return "택배/물류"
     if any(kw in text for kw in KW_WAGE): return "임금/처우"
     if any(kw in text for kw in KW_SAFETY): return "안전/산재"
@@ -72,7 +69,6 @@ def categorize(text):
     return "일반"
 
 def detect_company(text):
-    """기사 내 언급된 주요 물류/택배 기업 감지"""
     detected = []
     for cmp_name, keywords in COMPANIES.items():
         if any(kw in text for kw in keywords):
@@ -82,6 +78,7 @@ def detect_company(text):
 def fetch_rss(keyword):
     encoded_kw = urllib.parse.quote(keyword)
     url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
+    
     articles = []
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
@@ -95,7 +92,6 @@ def fetch_rss(keyword):
                 desc = clean_html(item.findtext('description') or "")
                 pub_date_str = item.findtext('pubDate') or ""
                 
-                # 발행 시각(pubDate) 파싱 및 KST 변환
                 pub_dt = None
                 if pub_date_str:
                     try:
@@ -128,6 +124,10 @@ def main():
     now_kst = datetime.now(KST)
     print(f"현재 KST 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # 현재 시각 기준 정확히 12시간 전
+    time_threshold = now_kst - timedelta(hours=12)
+    print(f"기사 필터링 기준 시각 (최근 12시간 이내): {time_threshold.strftime('%Y-%m-%d %H:%M:%S')}")
+
     articles_dict = {}
 
     for kw in KEYWORDS:
@@ -138,17 +138,15 @@ def main():
 
     all_articles = list(articles_dict.values())
 
-    # [핵심 1] 최근 5시간 이내에 보도된 신규 기사만 필터링 (예전 기사 반복 수집 완벽 차단)
-    time_threshold = now_kst - timedelta(hours=5)
+    # [핵심 수정] 날짜 정보가 없거나, 12시간 이내 기사가 아니면 무조건 제외 (옛날 기사 유입 원천 차단)
     articles = []
     for art in all_articles:
-        if art['pub_dt']:
-            if art['pub_dt'] >= time_threshold:
-                articles.append(art)
+        if art['pub_dt'] and art['pub_dt'] >= time_threshold:
+            articles.append(art)
         else:
-            articles.append(art) # 발행일 정보가 없는 경우 안전을 위해 포함
+            print(f"[제외됨 - 기간 초과/날짜 오류] {art['title']} ({art['pub_dt']})")
 
-    print(f"최신 조건에 부합하는 수집된 기사 수: {len(articles)}개")
+    print(f"최근 12시간 내 엄격히 검증된 신규 기사 수: {len(articles)}개")
 
     header_time = now_kst.strftime("%Y-%m-%d %H:%M")
 
@@ -157,18 +155,15 @@ def main():
         send_telegram(f"[주요 뉴스 브리핑 - {header_time}]\n\n현재 조건에 맞는 신규 뉴스가 없습니다.")
         return
 
-    # 중요도 점수 산정 (포함된 키워드 가짓수 카운트)
     all_kws = KW_PARCEL + KW_WAGE + KW_SAFETY + KW_UNION + KW_POLICY
     for art in articles:
         full_text = art['title'] + " " + art['desc']
         score = sum(1 for kw in all_kws if kw in full_text)
         art['score'] = score
 
-    # 정렬: 가짓수 높은 순 정렬
     articles.sort(key=lambda x: x['score'], reverse=True)
     top_20 = articles[:20]
 
-    # [핵심 2] 텔레그램 텍스트 한도 초과 시 메시지 자동 분할 전송
     max_len = 3800
     messages = []
     current_msg = f"[주요 뉴스 브리핑 - {header_time}]\n\n"
@@ -187,7 +182,6 @@ def main():
     if current_msg.strip():
         messages.append(current_msg)
 
-    # 분할된 메시지 순차 발송
     for msg in messages:
         send_telegram(msg)
         
