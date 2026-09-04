@@ -4,13 +4,34 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-
-KEYWORDS = ["단체교섭", "노사관계", "택배노조", "화물연대", "노동위원회"]
-TARGET_HOURS_KST = [8, 10, 12, 15, 17, 19, 23]
 KST = timezone(timedelta(hours=9))
+
+# 1. 사내 대시보드 기반 복합 카테고리 및 키워드 세트 정의
+KW_PARCEL = ["택배", "물류", "배송", "화물", "운송", "택배기사", "화물연대", "택배노조", "택배업계", "택배차량"]
+KW_WAGE = ["임금", "통상임금", "수당", "급여", "처우", "성과급", "기본급", "임금인상", "임금체불"]
+KW_SAFETY = ["안전", "산재", "안전사고", "사고", "과로사", "산업안전", "안전기준", "사망", "위험"]
+KW_UNION = ["노동조합", "노조", "파업", "교섭", "단체교섭", "노조활동", "파업찬반", "쟁의행위", "노동위원회", "노사관계"]
+KW_POLICY = ["정책", "제도", "법안", "개정", "정부", "규제", "고용부", "국토부", "대책", "법제화"]
+KW_POLITICS = ["정치", "국회", "여당", "야당", "국회의원", "선거", "정당", "상임위", "입법"]
+
+# 2. 구글 뉴스 RSS 검색에 활용할 대표 키워드 통합 리스트 (대시보드 키워드 포함)
+KEYWORDS = [
+    "단체교섭", "노사관계", "택배노조", "화물연대", "노동위원회",
+    "택배", "물류", "배송", "화물", "임금", "안전", "산재", "과로사", "노조", "파업", "국토부"
+]
+
+# 3. 주요 물류/택배 기업 정의
+COMPANIES = {
+    "CJ대한통운": ["CJ대한통운", "CJ"],
+    "쿠팡": ["쿠팡", "쿠팡CLS", "쿠팡이츠", "CLS"],
+    "롯데글로벌로지스": ["롯데글로벌로지스", "롯데택배", "롯데"],
+    "한진": ["한진", "한진택배"],
+    "로젠": ["로젠", "로젠택배"]
+}
 
 def clean_html(text):
     if not text:
@@ -40,9 +61,26 @@ def send_telegram(text):
         print(f"[오류] 텔레그램 발송 실패: {e}")
         return False
 
+def categorize(text):
+    """기사 내용에서 사내 대시보드 기준 카테고리 판별"""
+    if any(kw in text for kw in KW_PARCEL): return "택배/물류"
+    if any(kw in text for kw in KW_WAGE): return "임금/처우"
+    if any(kw in text for kw in KW_SAFETY): return "안전/산재"
+    if any(kw in text for kw in KW_UNION): return "노조/쟁의"
+    if any(kw in text for kw in KW_POLICY): return "정책/제도"
+    if any(kw in text for kw in KW_POLITICS): return "정치동향"
+    return "일반"
+
+def detect_company(text):
+    """기사 내 언급된 주요 물류/택배 기업 감지"""
+    detected = []
+    for cmp_name, keywords in COMPANIES.items():
+        if any(kw in text for kw in keywords):
+            detected.append(cmp_name)
+    return ", ".join(detected) if detected else "일반"
+
 def fetch_rss(keyword):
     encoded_kw = urllib.parse.quote(keyword)
-    # 한국 뉴스 전용 RSS 엔진 적용 (네이버, 연합뉴스, 주요 언론사 포함)
     url = f"https://news.google.com/rss/search?q={encoded_kw}&hl=ko&gl=KR&ceid=KR:ko"
     articles = []
     try:
@@ -55,9 +93,32 @@ def fetch_rss(keyword):
                 title = clean_html(item.findtext('title') or "")
                 link = (item.findtext('link') or "").strip()
                 desc = clean_html(item.findtext('description') or "")
+                pub_date_str = item.findtext('pubDate') or ""
                 
-                if link:
-                    articles.append({'title': title, 'link': link, 'desc': desc})
+                # 발행 시각(pubDate) 파싱 및 KST 변환
+                pub_dt = None
+                if pub_date_str:
+                    try:
+                        dt = parsedate_to_datetime(pub_date_str)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        pub_dt = dt.astimezone(KST)
+                    except Exception:
+                        pass
+                
+                if link and title:
+                    full_text = title + " " + desc
+                    cat = categorize(full_text)
+                    company = detect_company(full_text)
+                    
+                    articles.append({
+                        'title': title, 
+                        'link': link, 
+                        'desc': desc, 
+                        'pub_dt': pub_dt,
+                        'cat': cat,
+                        'company': company
+                    })
     except Exception as e:
         print(f"[{keyword}] RSS 수집 오류: {e}")
         
@@ -75,41 +136,62 @@ def main():
             if art['link'] not in articles_dict:
                 articles_dict[art['link']] = art
 
-    articles = list(articles_dict.values())
-    print(f"수집된 전체 기사 수: {len(articles)}개")
+    all_articles = list(articles_dict.values())
+
+    # [핵심 1] 최근 5시간 이내에 보도된 신규 기사만 필터링 (예전 기사 반복 수집 완벽 차단)
+    time_threshold = now_kst - timedelta(hours=5)
+    articles = []
+    for art in all_articles:
+        if art['pub_dt']:
+            if art['pub_dt'] >= time_threshold:
+                articles.append(art)
+        else:
+            articles.append(art) # 발행일 정보가 없는 경우 안전을 위해 포함
+
+    print(f"최신 조건에 부합하는 수집된 기사 수: {len(articles)}개")
 
     header_time = now_kst.strftime("%Y-%m-%d %H:%M")
 
-    # 수집된 기사가 0개일 경우, 지정해주신 대로 텔레그램 브리핑 발송
     if not articles:
-        print("[알림] 수집된 뉴스가 없어 안내 메시지를 발송합니다.")
-        send_telegram(f"[주요 뉴스 브리핑 - {header_time}]\n\n현재 조건에 맞는 최신 뉴스가 없습니다.")
+        print("[알림] 수집된 신규 뉴스가 없어 안내 메시지를 발송합니다.")
+        send_telegram(f"[주요 뉴스 브리핑 - {header_time}]\n\n현재 조건에 맞는 신규 뉴스가 없습니다.")
         return
 
     # 중요도 점수 산정 (포함된 키워드 가짓수 카운트)
+    all_kws = KW_PARCEL + KW_WAGE + KW_SAFETY + KW_UNION + KW_POLICY
     for art in articles:
         full_text = art['title'] + " " + art['desc']
-        score = sum(1 for kw in KEYWORDS if kw in full_text)
+        score = sum(1 for kw in all_kws if kw in full_text)
         art['score'] = score
 
     # 정렬: 가짓수 높은 순 정렬
     articles.sort(key=lambda x: x['score'], reverse=True)
     top_20 = articles[:20]
 
-    # 메시지 구성 (이모티콘 사용 금지)
-    message = f"[주요 뉴스 브리핑 - {header_time}]\n\n"
-    max_len = 3900
+    # [핵심 2] 텔레그램 텍스트 한도 초과 시 메시지 자동 분할 전송
+    max_len = 3800
+    messages = []
+    current_msg = f"[주요 뉴스 브리핑 - {header_time}]\n\n"
 
     sent_count = 0
     for i, art in enumerate(top_20, 1):
-        item_text = f"{i}. {art['title']}\n링크: {art['link']}\n\n"
-        if len(message) + len(item_text) > max_len:
-            break
-        message += item_text
+        item_text = f"{i}. {art['title']}\n분류: {art['cat']} | 기업: {art['company']}\n링크: {art['link']}\n\n"
+        
+        if len(current_msg) + len(item_text) > max_len:
+            messages.append(current_msg)
+            current_msg = f"[주요 뉴스 브리핑 - {header_time} (이어서)]\n\n"
+            
+        current_msg += item_text
         sent_count += 1
 
-    if sent_count > 0:
-        send_telegram(message)
+    if current_msg.strip():
+        messages.append(current_msg)
+
+    # 분할된 메시지 순차 발송
+    for msg in messages:
+        send_telegram(msg)
+        
+    print(f"총 {sent_count}건의 기사가 성공적으로 전송되었습니다.")
 
 if __name__ == "__main__":
     main()
