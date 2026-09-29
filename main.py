@@ -124,7 +124,6 @@ def main():
     now_kst = datetime.now(KST)
     print(f"현재 KST 시각: {now_kst.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # 현재 시각 기준 정확히 12시간 전
     time_threshold = now_kst - timedelta(hours=12)
     print(f"기사 필터링 기준 시각 (최근 12시간 이내): {time_threshold.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -138,13 +137,12 @@ def main():
 
     all_articles = list(articles_dict.values())
 
-    # [핵심 수정] 날짜 정보가 없거나, 12시간 이내 기사가 아니면 무조건 제외 (옛날 기사 유입 원천 차단)
     articles = []
     for art in all_articles:
         if art['pub_dt'] and art['pub_dt'] >= time_threshold:
             articles.append(art)
         else:
-            print(f"[제외됨 - 기간 초과/날짜 오류] {art['title']} ({art['pub_dt']})")
+            pass
 
     print(f"최근 12시간 내 엄격히 검증된 신규 기사 수: {len(articles)}개")
 
@@ -182,9 +180,19 @@ def main():
     if current_msg.strip():
         messages.append(current_msg)
 
+    # 1. 기존 방식대로 상세 기사들 전송
     for msg in messages:
         send_telegram(msg)
         
+    # 2. [추가된 기능] 모든 상세 전송이 끝난 맨 마지막에 헤드라인만 모은 요약 메시지 1개 발송
+    if top_20:
+        summary_lines = [f"[오늘의 주요 헤드라인 모음 - {header_time}]\n"]
+        for i, art in enumerate(top_20, 1):
+            summary_lines.append(f"{i}. {art['title']}")
+        
+        summary_msg = "\n".join(summary_lines)
+        send_telegram(summary_msg)
+
     print(f"총 {sent_count}건의 기사가 성공적으로 전송되었습니다.")
 
 if __name__ == "__main__":
